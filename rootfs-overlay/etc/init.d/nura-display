@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+description="Nura: bring up DSI panel + Adreno (msm) and the boot splash before the session"
+
+depend() {
+	need udev-postmount
+	before greetd display-manager kill-plymouth modemmanager
+}
+
+start() {
+	ebegin "Bringing up display"
+	modprobe nura_ovl
+	sleep 5
+	modprobe dispcc_milos
+	sleep 1
+	modprobe msm separate_gpu_kms=0
+	sleep 3
+	modprobe panel_novatek_nt37706a
+	sleep 3
+	i=0
+	while [ $i -lt 100 ]; do
+		ls /sys/class/drm/card*-DSI-* >/dev/null 2>&1 && break
+		i=$((i+1)); sleep 0.2
+	done
+	mkdir -p /run/plymouth
+	plymouthd --mode=boot --pid-file=/run/plymouth/pid >/dev/null 2>&1 && plymouth show-splash >/dev/null 2>&1
+	# hand the screen over to KWin (as root) once the session starts
+	( i=0; while [ $i -lt 300 ] && [ ! -e /tmp/plasma-session.log ]; do i=$((i+1)); sleep 0.5; done
+	  sleep 1; plymouth quit --retain-splash >/dev/null 2>&1; sleep 15; pkill plymouthd 2>/dev/null ) >/dev/null 2>&1 &
+	eend 0
+}

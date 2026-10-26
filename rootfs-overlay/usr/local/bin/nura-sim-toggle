@@ -1,0 +1,6 @@
+#!/bin/sh
+# switch the active SIM slot (1 <-> 2); the modem re-registers on the other SIM
+cur=$(mmcli -m 0 | sed -n 's/.*slot \([12]\):.*(active).*/\1/p' | head -1)
+[ "$cur" = 1 ] && new=2 || new=1
+mmcli -m 0 --set-primary-sim-slot=$new
+notify-send "SIM" "Active SIM slot: $new" 2>/dev/null

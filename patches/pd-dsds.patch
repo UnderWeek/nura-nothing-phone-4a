@@ -1,0 +1,133 @@
+diff --git a/modem-daemon/src/mm-modem-controller.cpp b/modem-daemon/src/mm-modem-controller.cpp
+index 9bcf97b..168066d 100644
+--- a/modem-daemon/src/mm-modem-controller.cpp
++++ b/modem-daemon/src/mm-modem-controller.cpp
+@@ -4,6 +4,24 @@
+ 
+ #include "mm-modem-controller.h"
+ 
++// Nura: dual-SIM support.  The dialer passes an empty device when it cannot choose one;
++// find the modem that owns the call, or fall back to the first usable modem for dialing.
++static QSharedPointer<ModemManager::ModemDevice> nuraResolveModem(const QString &deviceUni, const QString &callUni, bool forDial)
++{
++    auto modem = ModemManager::findModemDevice(deviceUni);
++    if (!modem.isNull())
++        return modem;
++    const auto devices = ModemManager::modemDevices();
++    if (!forDial) {
++        for (const auto &d : devices) {
++            const auto voice = d->interface(ModemManager::ModemDevice::VoiceInterface).objectCast<ModemManager::ModemVoice>();
++            if (!voice.isNull() && !voice->findCall(callUni).isNull())
++                return d;
++        }
++    }
++    return devices.isEmpty() ? modem : devices.first();
++}
++
+ ModemManagerController::ModemManagerController(QObject *parent)
+     : ModemController(parent)
+ {
+@@ -121,7 +139,7 @@ QString ModemManagerController::callNumber(const QString &deviceUni, const QStri
+ void ModemManagerController::createCall(const QString &deviceUni, const QString &callUni)
+ {
+     qDebug() << Q_FUNC_INFO << "creating call";
+-    const auto modem = ModemManager::findModemDevice(deviceUni);
++    const auto modem = nuraResolveModem(deviceUni, QString(), true);
+     if (modem.isNull()) {
+         qDebug() << Q_FUNC_INFO << "deviceUni not found:" << deviceUni;
+         return;
+@@ -141,7 +159,7 @@ void ModemManagerController::createCall(const QString &deviceUni, const QString
+ 
+ void ModemManagerController::acceptCall(const QString &deviceUni, const QString &callUni)
+ {
+-    const auto modem = ModemManager::findModemDevice(deviceUni);
++    const auto modem = nuraResolveModem(deviceUni, callUni, false);
+     if (modem.isNull()) {
+         qDebug() << Q_FUNC_INFO << "deviceUni not found:" << deviceUni;
+         return;
+@@ -161,7 +179,7 @@ void ModemManagerController::acceptCall(const QString &deviceUni, const QString
+ 
+ void ModemManagerController::hangUp(const QString &deviceUni, const QString &callUni)
+ {
+-    const auto modem = ModemManager::findModemDevice(deviceUni);
++    const auto modem = nuraResolveModem(deviceUni, callUni, false);
+     if (modem.isNull()) {
+         qDebug() << Q_FUNC_INFO << "deviceUni not found:" << deviceUni;
+         return;
+@@ -181,7 +199,7 @@ void ModemManagerController::hangUp(const QString &deviceUni, const QString &cal
+ 
+ void ModemManagerController::sendDtmf(const QString &deviceUni, const QString &callUni, const QString &tones)
+ {
+-    const auto modem = ModemManager::findModemDevice(deviceUni);
++    const auto modem = nuraResolveModem(deviceUni, callUni, false);
+     if (modem.isNull()) {
+         qDebug() << Q_FUNC_INFO << "deviceUni not found:" << deviceUni;
+         return;
+diff --git a/plasma-dialer/src/qml/dialpad/Dialpad.qml b/plasma-dialer/src/qml/dialpad/Dialpad.qml
+index 23aafb2..1bb11c3 100644
+--- a/plasma-dialer/src/qml/dialpad/Dialpad.qml
++++ b/plasma-dialer/src/qml/dialpad/Dialpad.qml
+@@ -65,10 +65,62 @@ GridLayout {
+         } else if (number === "*#06#") {
+             imeiSheet.show();
+         } else {
+-            CallUtils.dial(deviceUni, number);
++            const devices = DeviceUtils.deviceUniList;
++            if (devices.length > 1) {
++                simChooser.number = number;
++                simChooser.open();
++            } else {
++                CallUtils.dial(deviceUni, number);
++            }
++        }
++    }
++
++    // Nura: choose the SIM to call with when the phone has more than one modem
++    Kirigami.Dialog {
++        id: simChooser
++        property string number
++        title: i18n("Call with…")
++        standardButtons: Kirigami.Dialog.Cancel
++        padding: Kirigami.Units.largeSpacing
++        ColumnLayout {
++            spacing: Kirigami.Units.largeSpacing
++            Repeater {
++                model: DeviceUtils.deviceUniList
++                delegate: Controls.Button {
++                    Layout.fillWidth: true
++                    Layout.preferredHeight: Kirigami.Units.gridUnit * 3
++                    icon.name: "phone"
++                    text: pad.simLabel(modelData, index)
++                    onClicked: {
++                        simChooser.close();
++                        CallUtils.dial(modelData, simChooser.number);
++                    }
++                }
++            }
+         }
+     }
+ 
++    property var simLabels: ({})
++    function simLabel(uni, index) {
++        const l = simLabels[uni];
++        return l ? l : i18n("SIM %1", index + 1);
++    }
++    Component.onCompleted: {
++        // /run/nura-sims: lines "<modem path>|<label>", written at boot by nura-sims
++        const x = new XMLHttpRequest();
++        x.onreadystatechange = function() {
++            if (x.readyState !== XMLHttpRequest.DONE || !x.responseText) return;
++            const m = {};
++            x.responseText.split("\n").forEach(function(line) {
++                const k = line.indexOf("|");
++                if (k > 0) m[line.substring(0, k)] = line.substring(k + 1);
++            });
++            pad.simLabels = m;
++        };
++        x.open("GET", "file:///run/nura-sims");
++        x.send();
++    }
++
+     function callVoicemail() {
+         var number = VoiceMailUtils.getVoicemailNumber();
+         if (number === "") {

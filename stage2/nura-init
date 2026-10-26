@@ -1,0 +1,57 @@
+#!/bin/sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs devtmpfs /dev
+[ -c /dev/kmsg ] && exec >/dev/kmsg 2>&1
+log() { echo "NURA: $*"; }
+log "nura-init v14 mainline $(uname -r)"
+sleep 5
+log "block: $(ls /sys/class/block 2>&1 | tr '\n' ' ')"
+log "udc: $(ls /sys/class/udc 2>&1)"
+mkdir -p /dev/pts; mount -t devpts devpts /dev/pts
+mkdir -p /sys/kernel/config; mount -t configfs configfs /sys/kernel/config
+G=/sys/kernel/config/usb_gadget/nura; mkdir -p $G || log "mkdir gadget FAIL"; cd $G
+echo 0x1d6b > idVendor; echo 0x0104 > idProduct
+mkdir -p strings/0x409 configs/c.1/strings/0x409 functions/ecm.usb0
+echo NURA0001 > strings/0x409/serialnumber; echo "Nura" > strings/0x409/manufacturer; echo "Frogger" > strings/0x409/product
+echo ECM > configs/c.1/strings/0x409/configuration
+echo 02:00:00:00:00:01 > functions/ecm.usb0/dev_addr; echo 02:00:00:00:00:02 > functions/ecm.usb0/host_addr
+ln -s $G/functions/ecm.usb0 $G/configs/c.1/ecm.usb0 || log "ln FAIL rc=$?"
+for r in /sys/class/usb_role/*/role; do [ -e "$r" ] && { echo device > "$r"; log "role $r -> $(cat $r)"; }; done
+n=0
+while [ $n -lt 20 ]; do
+    for u in /sys/class/udc/*; do
+        [ -e "$u" ] && echo "${u##*/}" > $G/UDC && { log "UDC bound ${u##*/}"; break 2; }
+    done
+    n=$((n+1)); sleep 1
+done
+ip link set usb0 up && ip addr add 192.168.77.2/24 dev usb0 && log "usb0 up"
+
+# rootfs goes to RAM, nothing is written to flash
+mkdir -p /newroot
+mount -t tmpfs -o size=9g,mode=755 tmpfs /newroot
+cat > /bin/rcv <<'RCV'
+#!/bin/sh
+cd /newroot && gzip -dc | tar x && sync && touch /tmp/rootfs.done
+RCV
+chmod +x /bin/rcv
+socat TCP6-LISTEN:2323,reuseaddr,fork EXEC:/bin/sh,stderr &
+socat TCP6-LISTEN:4444,reuseaddr,fork EXEC:/bin/rcv &
+log "shell on [::]:2323, rootfs receiver on [::]:4444, waiting ${NURA_WAIT:-300}s"
+
+i=0
+while [ ! -e /tmp/rootfs.done ] && [ $i -lt ${NURA_WAIT:-300} ]; do i=$((i+1)); sleep 1; done
+
+if [ -e /tmp/rootfs.done ] && [ -x /newroot/sbin/init ]; then
+    log "rootfs received ($(ls /newroot | tr '\n' ' ')), switching root"
+    pkill socat
+    sleep 1
+    mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run /newroot/tmp
+    mount --move /proc /newroot/proc; mount --move /sys /newroot/sys; mount --move /dev /newroot/dev
+    ls -la /newroot/sbin/init /newroot/bin/busybox 2>&1 | while read l; do echo "NURA> $l"; done
+    switch_root /newroot /sbin/init
+    log "switch_root FAILED rc=$?; falling back to chroot"
+    sleep 2
+    exec chroot /newroot /sbin/init
+fi
+log "no rootfs received, giving up (phone reboots back to Android)"
+exit 0

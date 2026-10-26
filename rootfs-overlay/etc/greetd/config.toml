@@ -1,0 +1,10 @@
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/local/bin/nura-session"
+user = "nura"
+
+[initial_session]
+command = "/usr/local/bin/nura-session"
+user = "nura"

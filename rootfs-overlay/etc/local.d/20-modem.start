@@ -1,0 +1,33 @@
+#!/bin/sh
+# Nura (Nothing Phone 4a): bring up adsp/cdsp/modem in the right order.
+# rmtfs (read-write!) and tqftpserv are started by OpenRC before 'local'.
+modprobe qcom_pd_mapper
+modprobe ipa
+for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x rmtfs >/dev/null && break; sleep 1; done
+modprobe qcom_q6v5_pas
+sleep 5
+for r in /sys/class/remoteproc/*; do
+    [ "$(cat $r/name)" = modem ] && echo start > $r/state
+done
+# wait for the modem QRTR node, then make slot 2 the primary GW session
+# (ModemManager picks slot 2 on this dual-SIM phone; a mismatch makes it loop)
+for i in $(seq 1 40); do qmicli --silent -pd qrtr://0 --uim-noop >/dev/null 2>&1 && break; sleep 1; done
+AID=$(qmicli -d qrtr://0 --uim-get-card-status 2>/dev/null | grep -A9 -E "^Slot \[2\]" | grep -A1 "Application ID" | tail -1 | tr -d "[:space:]")
+if [ -n "$AID" ]; then
+    qmicli -d qrtr://0 -p --uim-change-provisioning-session="slot=2,activate=yes,session-type=primary-gw-provisioning,aid=$AID" >/dev/null 2>&1
+fi
+# Second subscription (SIM in slot 1) -> secondary GW session, then expose it as its own
+# QRTR "modem" through the DSDS proxy so ModemManager creates a second modem for it.
+AID1=$(qmicli -d qrtr://0 --uim-get-card-status 2>/dev/null | grep -A9 -E "^Slot \[1\]" | grep -A1 "Application ID" | tail -1 | tr -d "[:space:]")
+if [ -n "$AID1" ]; then
+    qmicli -d qrtr://0 -p --uim-change-provisioning-session="slot=1,activate=yes,session-type=secondary-gw-provisioning,aid=$AID1" >/dev/null 2>&1
+    sleep 5
+    start-stop-daemon -b -m -p /run/qmi-dsds-proxy.pid -S -x /usr/bin/python3 -- /usr/local/bin/qmi-dsds-proxy.py
+    sleep 2
+fi
+sleep 3
+rc-service polkit start >/dev/null 2>&1
+rc-service modemmanager restart >/dev/null 2>&1
+# labels for the dialer's SIM chooser (modems appear a little later)
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 8; /usr/local/bin/nura-sims; [ "$(wc -l < /run/nura-sims)" -ge 2 ] && break; done
+exit 0

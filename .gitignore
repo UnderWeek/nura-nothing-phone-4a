@@ -1,0 +1,6 @@
+build/
+*.img
+*.tar.gz
+firmware/
+fw/
+.DS_Store

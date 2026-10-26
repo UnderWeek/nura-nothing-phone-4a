@@ -1,0 +1,10 @@
+#!/bin/sh
+export PATH=/bin:/sbin:/usr/sbin
+mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs devtmpfs /dev
+[ -c /dev/kmsg ] && exec >/dev/kmsg 2>&1
+echo "NURA: stage1 (downstream $(uname -r)), kexec -> mainline Milos"
+CL="printk.devkmsg=on rdinit=/nura-init panic=3 log_buf_len=32M msm.separate_gpu_kms=0 console=tty0 ignore_loglevel clk_ignore_unused pd_ignore_unused dyndbg=\"file drivers/usb/gadget/* +p; file drivers/usb/dwc3/* +p\""
+kexec -c -l /boot/Image-milos --initrd=/boot/stage2.gz --dtb=/boot/milos.dtb --command-line="$CL" && echo "NURA: kexec loaded" || { echo "NURA: kexec -l FAILED"; exit 0; }
+sync
+kexec -e || echo "NURA: kexec -e FAILED"
+exit 0

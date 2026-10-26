@@ -1,0 +1,17 @@
+#!/bin/sh
+# Nura session launcher (greetd runs this as user nura): Plasma Mobile on the real DSI panel.
+SCAN=""
+for c in /sys/class/drm/card[0-9]*-DSI-*; do
+    [ -e "$c" ] || continue
+    SCAN=/dev/dri/$(basename "$c" | sed 's/-DSI-.*//')
+done
+if [ -z "$SCAN" ]; then
+    for c in /sys/class/drm/card[0-9]*; do
+        [ -e "$c/device/driver" ] || continue
+        case "$(basename "$(readlink "$c/device/driver")")" in simple-framebuffer|simpledrm) SCAN=/dev/dri/$(basename "$c") ;; esac
+    done
+fi
+[ -n "$SCAN" ] && export KWIN_DRM_DEVICES="$SCAN"
+export QML_XHR_ALLOW_FILE_READ=1
+export QT_QPA_PLATFORM=wayland KWIN_COMPOSE=O2ES
+exec /usr/lib/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasmamobile > /tmp/plasma-session.log 2>&1

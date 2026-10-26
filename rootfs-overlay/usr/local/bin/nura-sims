@@ -1,0 +1,13 @@
+#!/bin/sh
+# write "<modem dbus path>|<label>" lines for the dialer's SIM chooser
+mkdir -p /run
+out=/run/nura-sims.tmp; : > $out
+for m in $(mmcli -L 2>/dev/null | grep -o 'Modem/[0-9]*' | cut -d/ -f2); do
+    sim=$(mmcli -m $m -K 2>/dev/null | sed -n 's/^modem.generic.sim *: *//p')
+    [ -z "$sim" ] && continue
+    sid=${sim##*/}
+    op=$(mmcli -i $sid -K 2>/dev/null | sed -n 's/^sim.properties.operator-name *: *//p')
+    [ -z "$op" ] || [ "$op" = "--" ] && op="SIM"
+    echo "/org/freedesktop/ModemManager1/Modem/$m|$op" >> $out
+done
+mv $out /run/nura-sims

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Nura: keep the USB ethernet gadget (usb0) up even if the gadget is re-bound.
+( while true; do
+    if [ -d /sys/class/net/usb0 ]; then
+        ip link set usb0 up 2>/dev/null
+        ip addr show dev usb0 | grep -q "172.16.42.1/24" || ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+        # make sure the IPv6 link-local exists
+        [ "$(cat /proc/sys/net/ipv6/conf/usb0/disable_ipv6 2>/dev/null)" = 1 ] && echo 0 > /proc/sys/net/ipv6/conf/usb0/disable_ipv6
+    fi
+    sleep 3
+  done ) >/dev/null 2>&1 &
+exit 0

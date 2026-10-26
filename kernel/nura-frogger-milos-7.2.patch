@@ -1,0 +1,1674 @@
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 6f33c4e2f..4ca240b24 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -58,6 +58,8 @@ dtb-$(CONFIG_ARCH_QCOM)	+= lemans-evk-ifp-mezzanine.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= mahua-crd.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= milos-fairphone-fp6.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= milos-nothing-asteroids.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= milos-nothing-frogger.dtb
++DTC_FLAGS_milos-nothing-frogger := -@
+ dtb-$(CONFIG_ARCH_QCOM)	+= monaco-arduino-monza.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= monaco-evk.dtb
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+index 42d0a529b..9f6e7123e 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+@@ -1423,7 +1423,9 @@ static struct msm_display_topology dpu_crtc_get_topology(
+ 	else
+ 		topology.num_lm = 1;
+ 
+-	if (crtc_state->ctm || crtc_state->gamma_lut)
++	/* NURA: Milos has a single DSPP; ignore colour management rather than failing the modeset */
++	if ((crtc_state->ctm || crtc_state->gamma_lut) &&
++	    dpu_kms->catalog->dspp_count >= topology.num_lm)
+ 		topology.num_dspp = topology.num_lm;
+ 
+ 	return topology;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f26e..2ac517db5 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -134,8 +134,8 @@ static void drm_mode_to_intf_timing_params(
+ 		 * TODO: replace drm_dsc_get_bpp_int with logic to handle
+ 		 * fractional part if there is fraction
+ 		 */
+-		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
+-				(dsc->bits_per_component * 3);
++		timing->width = DIV_ROUND_UP(timing->width * drm_dsc_get_bpp_int(dsc),
++					     dsc->bits_per_component * 3);
+ 		timing->xres = timing->width;
+ 		timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
+ 	}
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 982abaaac..26554fe76 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -931,6 +931,7 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
+ 	u32 pkt_per_line;
+ 	u32 eol_byte_num;
+ 	u32 bytes_per_pkt;
++	u32 slice_per_pkt;
+ 
+ 	/* first calculate dsc parameters and then program
+ 	 * compress mode registers
+@@ -938,7 +939,9 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
+ 	slice_per_intf = dsc->slice_count;
+ 
+ 	total_bytes_per_intf = dsc->slice_chunk_size * slice_per_intf;
+-	bytes_per_pkt = dsc->slice_chunk_size; /* * slice_per_pkt; */
++	/* NURA: panel expects all slices of a line in one packet (slice_per_pkt = slice_count) */
++	slice_per_pkt = (!is_cmd_mode && slice_per_intf > 1) ? slice_per_intf : 1;
++	bytes_per_pkt = dsc->slice_chunk_size * slice_per_pkt;
+ 
+ 	eol_byte_num = total_bytes_per_intf % 3;
+ 
+@@ -948,7 +951,7 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
+ 	 * Since the current driver only supports slice_per_pkt = 1,
+ 	 * pkt_per_line will be equal to slice per intf for now.
+ 	 */
+-	pkt_per_line = slice_per_intf;
++	pkt_per_line = slice_per_intf / slice_per_pkt;
+ 
+ 	if (is_cmd_mode) /* packet data type */
+ 		reg = DSI_COMMAND_COMPRESSION_MODE_CTRL_STREAM0_DATATYPE(MIPI_DSI_DCS_LONG_WRITE);
+@@ -964,6 +967,7 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
+ 	if (pkt_per_line > 4)
+ 		drm_warn_once(msm_host->dev, "pkt_per_line too big");
+ 	reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_PKT_PER_LINE(pkt_per_line >> 1);
++	pr_info("NURA-DBG dsc timing: slice_count=%u chunk=%u spp=%u ppl=%u wc=%u eol=%u cmd=%d\n", slice_per_intf, dsc->slice_chunk_size, slice_per_pkt, pkt_per_line, bytes_per_pkt, eol_byte_num, is_cmd_mode);
+ 	reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_EOL_BYTE_NUM(eol_byte_num);
+ 	reg |= DSI_VIDEO_COMPRESSION_MODE_CTRL_EN;
+ 
+@@ -1458,9 +1462,16 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ 		ret = wait_for_completion_timeout(&msm_host->dma_comp,
+ 					msecs_to_jiffies(200));
+ 		DBG("ret=%d", ret);
+-		if (ret == 0)
++		if (ret == 0) {
++			pr_err("NURA-DBG dma timeout: CTRL=%08x STATUS0=%08x INTCTRL=%08x FIFO=%08x CLK_CTRL=%08x CLKSTAT=%08x DMA_BASE=%08x DMA_LEN=%08x CMD_CFG0=%08x VID_CFG0=%08x ERRINT=%08x\n",
++			       dsi_read(msm_host, REG_DSI_CTRL), dsi_read(msm_host, REG_DSI_STATUS0),
++			       dsi_read(msm_host, REG_DSI_INTR_CTRL), dsi_read(msm_host, REG_DSI_FIFO_STATUS),
++			       dsi_read(msm_host, REG_DSI_CLK_CTRL), dsi_read(msm_host, REG_DSI_CLK_STATUS),
++			       dsi_read(msm_host, REG_DSI_DMA_BASE), dsi_read(msm_host, REG_DSI_DMA_LEN),
++			       dsi_read(msm_host, REG_DSI_CMD_CFG0), dsi_read(msm_host, REG_DSI_VID_CFG0),
++			       dsi_read(msm_host, REG_DSI_ERR_INT_MASK0));
+ 			ret = -ETIMEDOUT;
+-		else
++		} else
+ 			ret = len;
+ 	} else {
+ 		ret = len;
+@@ -1629,6 +1640,9 @@ static void dsi_fifo_status(struct msm_dsi_host *msm_host)
+ 
+ 	/* fifo underflow, overflow */
+ 	if (status) {
++		pr_err_ratelimited("NURA-DBG fifo_status=%08x ctrl=%08x vid_cfg0=%08x status0=%08x\n", status,
++				   dsi_read(msm_host, REG_DSI_CTRL), dsi_read(msm_host, REG_DSI_VID_CFG0),
++				   dsi_read(msm_host, REG_DSI_STATUS0));
+ 		dsi_write(msm_host, REG_DSI_FIFO_STATUS, status);
+ 		msm_host->err_work_state |= DSI_ERR_STATE_FIFO;
+ 		if (status & DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW)
+@@ -1900,7 +1914,9 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
+ 	drm_dsc_set_rc_buf_thresh(dsc);
+ 
+ 	/* DPU supports only pre-SCR panels */
+-	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
++	/* NURA: DSC 1.2 streams need the 1.2 rate-control table (panel is configured for it) */
++	ret = drm_dsc_setup_rc_params(dsc, dsc->dsc_version_minor == 2 ?
++				      DRM_DSC_1_2_444 : DRM_DSC_1_1_PRE_SCR);
+ 	if (ret) {
+ 		DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
+ 		return ret;
+@@ -2702,3 +2718,14 @@ struct drm_dsc_config *msm_dsi_host_get_dsc_config(struct mipi_dsi_host *host)
+ 
+ 	return msm_host->dsc;
+ }
++
++/* NURA: let panel drivers know which refresh rate was selected */
++int msm_dsi_host_get_vrefresh(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	if (!msm_host->mode)
++		return 0;
++	return drm_mode_vrefresh(msm_host->mode);
++}
++EXPORT_SYMBOL_GPL(msm_dsi_host_get_vrefresh);
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index 2df16261b..2993e00ee 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -664,6 +664,16 @@ config DRM_PANEL_NOVATEK_NT37705
+ 	  display panels, such as the one found in the The Fairphone (Gen. 6)
+ 	  smartphone.
+ 
++config DRM_PANEL_NOVATEK_NT37706A
++	tristate "Novatek NT37706A DSI panel (Nothing Phone 4a)"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_DSC_HELPER
++	select DRM_DISPLAY_HELPER
++	help
++	  DRM driver for the Novatek NT37706A AMOLED DSI video panel (VXN).
++
+ config DRM_PANEL_NOVATEK_NT37801
+ 	tristate "Novatek NT37801/NT37810 AMOLED DSI panel"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 0640b5679..c2893e5a3 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -132,3 +132,4 @@ obj-$(CONFIG_DRM_PANEL_VISIONOX_VTDR6130) += panel-visionox-vtdr6130.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_R66451) += panel-visionox-r66451.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
++obj-$(CONFIG_DRM_PANEL_NOVATEK_NT37706A) += panel-novatek-nt37706a.o
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 007b589ce..779e5dbf8 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -803,6 +803,13 @@ config TOUCHSCREEN_PENMOUNT
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called penmount.
+ 
++config TOUCHSCREEN_FOCALTECH_FTS_SPI
++	tristate "FocalTech FTS SPI (v2, CRC) touchscreen"
++	depends on SPI && OF
++	help
++	  Say Y here to enable the FocalTech FT3681/FT3683G touchscreen
++	  controller connected over SPI (Nothing Phone (4a)).
++
+ config TOUCHSCREEN_EDT_FT5X06
+ 	tristate "EDT FocalTech FT5x06 I2C Touchscreen support"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index 4540169d9..0a4a6603d 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -120,3 +120,4 @@ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_FOCALTECH_FTS_SPI)	+= focaltech-fts-spi.o
+diff --git a/drivers/soc/qcom/apr.c b/drivers/soc/qcom/apr.c
+index ea7f83916..48d8e0a00 100644
+--- a/drivers/soc/qcom/apr.c
++++ b/drivers/soc/qcom/apr.c
+@@ -132,6 +132,11 @@ static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, const struct gpr_
+ 
+ 	hdr = &pkt->hdr;
+ 
++	if ((hdr->opcode >> 24) != 0x04 && hdr->pkt_size <= 4096) {
++		pr_info("NURA-TX op=0x%08x tok=0x%x src=0x%x dst=0x%x size=%d\n", hdr->opcode, hdr->token, hdr->src_port, hdr->dest_port, hdr->pkt_size);
++		print_hex_dump(KERN_INFO, "NURA-TX ", DUMP_PREFIX_OFFSET, 32, 4, pkt, hdr->pkt_size, false);
++	}
++
+ 	spin_lock_irqsave(&svc->lock, flags);
+ 	ret = rpmsg_trysend(pr->ch, pkt, hdr->pkt_size);
+ 	spin_unlock_irqrestore(&svc->lock, flags);
+diff --git a/sound/soc/codecs/aw88261.c b/sound/soc/codecs/aw88261.c
+index 549783d3e..bcb575995 100644
+--- a/sound/soc/codecs/aw88261.c
++++ b/sound/soc/codecs/aw88261.c
+@@ -205,9 +205,10 @@ static int aw88261_dev_check_sysst(struct aw_device *aw_dev)
+ 		if (ret)
+ 			return ret;
+ 
++		/* Nura: the boost stage only switches once there is signal (noise gate), do not require SWS */
+ 		check_val = reg_val & (~AW88261_BIT_SYSST_CHECK_MASK)
+-							& AW88261_BIT_SYSST_CHECK;
+-		if (check_val != AW88261_BIT_SYSST_CHECK) {
++							& (AW88261_BIT_SYSST_CHECK & ~AW88261_SWS_SWITCHING_VALUE);
++		if (check_val != (AW88261_BIT_SYSST_CHECK & ~AW88261_SWS_SWITCHING_VALUE)) {
+ 			dev_dbg(aw_dev->dev, "check sysst fail, reg_val=0x%04x, check:0x%x",
+ 				reg_val, AW88261_BIT_SYSST_CHECK);
+ 			usleep_range(AW88261_2000_US, AW88261_2000_US + 10);
+@@ -506,6 +507,10 @@ static int aw88261_dev_start(struct aw88261 *aw88261)
+ 		return 0;
+ 	}
+ 
++	/* AW88271 (chip id 0x2329): low-power clock detection (reg 0x59 bit 5) must be off while powering up */
++	if (aw_dev->chip_id == 0x2329)
++		regmap_update_bits(aw_dev->regmap, 0x59, BIT(5), 0);
++
+ 	/* power on */
+ 	aw88261_dev_pwd(aw_dev, false);
+ 	usleep_range(AW88261_2000_US, AW88261_2000_US + 10);
+@@ -546,6 +551,9 @@ static int aw88261_dev_start(struct aw88261 *aw88261)
+ 	aw88261_dev_clear_int_status(aw_dev);
+ 	aw_dev->status = AW88261_DEV_PW_ON;
+ 
++	if (aw_dev->chip_id == 0x2329)
++		regmap_update_bits(aw_dev->regmap, 0x59, BIT(5), BIT(5));
++
+ 	return 0;
+ 
+ sysst_check_fail:
+@@ -864,10 +872,31 @@ static int aw88261_set_tdm_slot(struct snd_soc_dai *dai,
+ 	return 0;
+ }
+ 
++static int aw88261_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
++{
++	struct snd_soc_component *component = dai->component;
++	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
++
++	if (stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return 0;
++
++	mutex_lock(&aw88261->lock);
++	if (mute)
++		aw88261_dev_stop(aw88261->aw_pa);
++	else
++		aw88261_start(aw88261);
++	mutex_unlock(&aw88261->lock);
++
++	return 0;
++}
++
+ static const struct snd_soc_dai_ops aw88261_dai_ops = {
+ 	.set_fmt = aw88261_set_fmt,
+ 	.hw_params = aw88261_hw_params,
+ 	.set_tdm_slot = aw88261_set_tdm_slot,
++	.mute_stream = aw88261_mute_stream,
++	.no_capture_mute = 1,
++	.mute_unmute_on_trigger = 1,
+ };
+ 
+ static struct snd_soc_dai_driver aw88261_dai[] = {
+@@ -1041,7 +1070,7 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
+ 	mutex_lock(&aw88261->lock);
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
+-		aw88261_start(aw88261);
++		/* Nura: started from mute_stream(), once the SoC (clock master) drives BCLK/WS */
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+ 		aw88261_dev_stop(aw88261->aw_pa);
+@@ -1259,7 +1288,7 @@ static int aw88261_init(struct aw88261 *aw88261, struct i2c_client *i2c, struct
+ 		dev_err(&i2c->dev, "%s read chipid error. ret = %d", __func__, ret);
+ 		return ret;
+ 	}
+-	if (chip_id != AW88261_CHIP_ID) {
++	if (chip_id != AW88261_CHIP_ID && chip_id != 0x2329 /* AW88271 */) {
+ 		dev_err(&i2c->dev, "unsupported device id = %x", chip_id);
+ 		return -ENXIO;
+ 	}
+@@ -1274,7 +1303,7 @@ static int aw88261_init(struct aw88261 *aw88261, struct i2c_client *i2c, struct
+ 	aw_dev->i2c = i2c;
+ 	aw_dev->regmap = regmap;
+ 	aw_dev->dev = &i2c->dev;
+-	aw_dev->chip_id = AW88261_CHIP_ID;
++	aw_dev->chip_id = chip_id;
+ 	aw_dev->acf = NULL;
+ 	aw_dev->prof_info.prof_desc = NULL;
+ 	aw_dev->prof_info.count = 0;
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index e6e9eb2e8..1bf22dc4d 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -858,7 +858,8 @@ static int audioreach_mfc_set_media_format(struct q6apm_graph *graph,
+ 	media_format = p;
+ 
+ 	media_format->sample_rate = cfg->sample_rate;
+-	media_format->bit_width = cfg->bit_width;
++	/* the backend (MI2S) runs at 32 bit, so the playback MFC has to output 32 bit too, as on Android */
++	media_format->bit_width = (cfg->direction == SNDRV_PCM_STREAM_PLAYBACK) ? 32 : cfg->bit_width;
+ 	media_format->num_channels = cfg->num_channels;
+ 	for (i = 0; i < num_channels; i++)
+ 		media_format->channel_mapping[i] = cfg->channel_map[i];
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 641d6d243..e5954498b 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -553,6 +553,15 @@ int q6apm_get_hw_pointer(struct q6apm_graph *graph, int dir)
+ }
+ EXPORT_SYMBOL_GPL(q6apm_get_hw_pointer);
+ 
++static void q6apm_dump_pkt(struct device *dev, const char *who, const struct gpr_resp_pkt *data)
++{
++	const struct gpr_hdr *hdr = &data->hdr;
++
++	dev_info(dev, "NURA-DBG %s: op=0x%08x tok=0x%x src=0x%x dst=0x%x len=%d: %*ph\n", who,
++		 hdr->opcode, hdr->token, hdr->src_port, hdr->dest_port, data->payload_size,
++		 min(data->payload_size, 48), data->payload);
++}
++
+ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ {
+ 	struct data_cmd_rsp_rd_sh_mem_ep_data_buffer_done_v2 *rd_done;
+@@ -568,6 +577,10 @@ static int graph_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 
+ 	result = data->payload;
+ 
++	if (hdr->opcode != DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2 &&
++	    hdr->opcode != DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_V2)
++		q6apm_dump_pkt(dev, "graph", data);
++
+ 	switch (hdr->opcode) {
+ 	case APM_EVENT_MODULE_TO_CLIENT:
+ 		event = data->payload;
+@@ -907,6 +920,7 @@ struct audioreach_module *q6apm_find_module_by_mid(struct q6apm_graph *graph, ui
+ 
+ }
+ 
++
+ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ {
+ 	gpr_device_t *gdev = priv;
+@@ -919,6 +933,7 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 	int graph_id, is_pos_buf;
+ 
+ 	result = data->payload;
++	q6apm_dump_pkt(dev, "apm", data);
+ 
+ 	switch (hdr->opcode) {
+ 	case APM_CMD_RSP_GET_SPF_STATE:
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+index 210836f7c..d1cba016f 100644
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -2,6 +2,7 @@
+ // Copyright (c) 2022, Linaro Limited
+ 
+ #include <dt-bindings/sound/qcom,q6afe.h>
++#include <linux/clk.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <sound/soc.h>
+@@ -82,6 +83,12 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+ 	channels->min = 2;
+ 	channels->max = 2;
+ 	switch (cpu_dai->id) {
++	case PRIMARY_MI2S_RX:
++	case PRIMARY_MI2S_TX:
++		/* Nura: the smart amps are clocked with 32-bit slots (64 fs) */
++		snd_mask_none(fmt);
++		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S32_LE);
++		break;
+ 	case TX_CODEC_DMA_TX_0:
+ 	case TX_CODEC_DMA_TX_1:
+ 	case TX_CODEC_DMA_TX_2:
+@@ -151,6 +158,17 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ 	if (!data)
+ 		return -ENOMEM;
+ 
++	/* Nura: hold the LPASS hardware votes that MI2S/TDM interfaces need (optional) */
++	{
++		struct clk_bulk_data *clks;
++
++		ret = devm_clk_bulk_get_all_enabled(dev, &clks);
++		if (ret == -EPROBE_DEFER)
++			return ret;
++		if (ret > 0)
++			dev_info(dev, "holding %d LPASS clock vote(s)\n", ret);
++	}
++
+ 	card->dev = dev;
+ 	dev_set_drvdata(dev, card);
+ 	snd_soc_card_set_drvdata(card, data);
+diff --git a/arch/arm64/boot/dts/qcom/milos-nothing-frogger.dts b/arch/arm64/boot/dts/qcom/milos-nothing-frogger.dts
+new file mode 100644
+index 000000000..2ea99e423
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/milos-nothing-frogger.dts
+@@ -0,0 +1,583 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Nothing Phone (4a) "frogger": based on the Phone (3a) devicetree.
++ */
++/dts-v1/;
++
++#include "milos-nothing-asteroids.dts"
++
++/ {
++	model = "Nothing Phone (4a)";
++	compatible = "nothing,frogger", "qcom,milos";
++
++	/* bootloader does not fill this in when we are kexec-ed */
++	memory@0 {
++		device_type = "memory";
++		reg = <0x0 0x80e00000 0x0 0xa00000
++		0x0 0x81cf5000 0x0 0xa000
++		0x0 0x82320000 0x0 0x180000
++		0x0 0xeea00000 0x0 0x11600000
++		0x8 0x80000000 0x0 0x2f8fe000
++		0x8 0xb0000000 0x0 0x7700000
++		0x9 0x80000000 0x1 0x80000000
++		0x8 0xbf800000 0x0 0xc0800000
++		0x0 0x82800000 0x0 0x8400000
++		0x0 0x9ea9c000 0x0 0x64000
++		0x0 0x9f300000 0x0 0x7100000
++		0x0 0xa7000000 0x0 0x39600000
++		0x0 0xe0a00000 0x0 0x7f00000>;
++	};
++};
++
++&tlmm {
++	gpio-reserved-ranges = <13 1>, <27 4>, <63 2>;
++};
++
++&ufs_mem_hc {
++	reset-gpios = <&tlmm 167 GPIO_ACTIVE_LOW>;
++
++	vcc-supply = <&vreg_l12b>;
++	vcc-max-microamp = <800000>;
++	vccq-supply = <&vreg_l5f>;
++	vccq-max-microamp = <750000>;
++
++	status = "okay";
++};
++
++&ufs_mem_phy {
++	vdda-phy-supply = <&vreg_l2b>;
++	vdda-pll-supply = <&vreg_l4b>;
++
++	status = "okay";
++};
++
++&{/chosen/framebuffer@e3940000} {
++	reg = <0x0 0xe3940000 0x0 0xcb4000>;
++	width = <1224>;
++	height = <2720>;
++	stride = <4896>;
++};
++
++&remoteproc_adsp {
++	firmware-name = "qcom/milos/nothing/frogger/adsp.mbn",
++			"qcom/milos/nothing/frogger/adsp_dtb.mbn";
++};
++
++&remoteproc_cdsp {
++	firmware-name = "qcom/milos/nothing/frogger/cdsp.mbn",
++			"qcom/milos/nothing/frogger/cdsp_dtb.mbn";
++};
++
++&remoteproc_mpss {
++	firmware-name = "qcom/milos/nothing/frogger/modem.mbn";
++};
++
++&remoteproc_wpss {
++	firmware-name = "qcom/milos/nothing/frogger/wpss.mbn";
++};
++
++&ipa {
++	firmware-name = "qcom/milos/nothing/frogger/ipa_fws.mbn";
++	memory-region = <&ipa_fw_mem>;
++
++	qcom,gsi-loader = "self";
++
++	status = "okay";
++};
++
++/ {
++	/*
++	 * Nothing binds to this, so fw_devlink never calls sync_state() on the
++	 * power domain / interconnect providers. That keeps the votes the
++	 * bootloader made for the display scanout alive (simple-framebuffer
++	 * only holds clocks) until a real display driver takes over.
++	 */
++	nura-hold {
++		compatible = "nura,hold";
++		power-domains = <&rpmhpd RPMHPD_CX>, <&rpmhpd RPMHPD_MX>;
++		interconnects = <&mmss_noc MASTER_MDP QCOM_ICC_TAG_ALWAYS
++				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++	};
++};
++
++&tlmm {
++	ts_active_state: ts-active-state {
++		pins = "gpio19", "gpio20";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-pull-up;
++	};
++};
++
++&spi0 {
++	status = "okay";
++
++	touchscreen@0 {
++		compatible = "focaltech,ft3683g-spi";
++		reg = <0>;
++		spi-max-frequency = <12000000>;
++
++		interrupts-extended = <&tlmm 19 IRQ_TYPE_EDGE_FALLING>;
++		reset-gpios = <&tlmm 20 GPIO_ACTIVE_LOW>;
++
++		vci-supply = <&vreg_l22b>;
++		vddio-supply = <&vreg_l11b>;
++
++		pinctrl-0 = <&ts_active_state>;
++		pinctrl-names = "default";
++
++		touchscreen-size-x = <1224>;
++		touchscreen-size-y = <2720>;
++	};
++};
++
++/* Display: NT37706A (VXN) DSI video panel, DSC */
++&tlmm {
++	disp_reset_n_active: disp-reset-n-active-state {
++		pins = "gpio12";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++	};
++
++	disp_reset_n_suspend: disp-reset-n-suspend-state {
++		pins = "gpio12";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
++	mdp_vsync: mdp-vsync-state {
++		pins = "gpio129";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++};
++
++/ {
++	vddic_1p8_panel: regulator-vddic-1p8-panel {
++		compatible = "regulator-fixed";
++		regulator-name = "vddic_1v8_t0";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		gpio = <&tlmm 109 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++	};
++};
++
++&mdss {
++	/* enabled at runtime by the nura-display overlay: an early enable makes Linux
++	 * detach the bootloader scanout from the SMMU and the screen goes black */
++	status = "disabled";
++};
++
++&mdss_dsi0 {
++	vdda-supply = <&vreg_l4b>;
++
++	status = "okay";
++
++	panel@0 {
++		compatible = "nothing,frogger-nt37706a-vxn";
++		reg = <0>;
++
++		reset-gpios = <&tlmm 12 GPIO_ACTIVE_LOW>;
++
++		vddio-supply = <&vreg_l9b>;
++		vddic-supply = <&vddic_1p8_panel>;
++		vci-supply = <&vreg_l19b>;
++
++		pinctrl-0 = <&disp_reset_n_active>, <&mdp_vsync>;
++		pinctrl-1 = <&disp_reset_n_suspend>, <&mdp_vsync>;
++		pinctrl-names = "default", "sleep";
++
++		port {
++			panel_in: endpoint {
++				remote-endpoint = <&mdss_dsi0_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	data-lanes = <0 1 2 3>;
++	remote-endpoint = <&panel_in>;
++};
++
++&mdss_dsi0_phy {
++	vdds-supply = <&vreg_l2b>;
++
++	status = "okay";
++};
++
++&dispcc {
++	status = "disabled";
++};
++
++/* GPU: Adreno 810 */
++&gpu {
++	status = "okay";
++};
++
++&gpu_zap_shader {
++	firmware-name = "qcom/milos/nothing/frogger/gen80300_zap.mbn";
++};
++
++/* ---- WCN6750 Wi-Fi / Bluetooth (same wiring as stock: bt-reset gpio53, uart11) ---- */
++/ {
++	vreg_s1j: regulator-pm3001a-s1j {
++		compatible = "regulator-fixed";
++		regulator-name = "pm3001a_s1j";
++		regulator-min-microvolt = <2200000>;
++		regulator-max-microvolt = <2200000>;
++		startup-delay-us = <1000>;
++
++		gpio = <&pmr735b_gpios 1 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		pinctrl-0 = <&s1j_enable_default>;
++		pinctrl-names = "default";
++	};
++
++	wcn6750-pmu {
++		compatible = "qcom,wcn6755-pmu", "qcom,wcn6750-pmu";
++
++		vddaon-supply = <&vreg_s3b>;
++		vddasd-supply = <&vreg_l7b>;
++		vddpmu-supply = <&vreg_s3b>;
++		vddrfa0p8-supply = <&vreg_s3b>;
++		vddrfa1p2-supply = <&vreg_s2b>;
++		vddrfa1p7-supply = <&vreg_s1b>;
++		vddrfa2p2-supply = <&vreg_s1j>;
++
++		bt-enable-gpios = <&tlmm 53 GPIO_ACTIVE_HIGH>;
++
++		clocks = <&rpmhcc RPMH_RF_CLK1>;
++
++		pinctrl-0 = <&bluetooth_enable_default>, <&pmk8550_sleep_clk_default>;
++		pinctrl-names = "default";
++
++		regulators {
++			vreg_pmu_rfa_cmn: ldo0 {
++				regulator-name = "vreg_pmu_rfa_cmn";
++			};
++
++			vreg_pmu_aon_0p59: ldo1 {
++				regulator-name = "vreg_pmu_aon_0p59";
++			};
++
++			vreg_pmu_wlcx_0p8: ldo2 {
++				regulator-name = "vreg_pmu_wlcx_0p8";
++			};
++
++			vreg_pmu_wlmx_0p85: ldo3 {
++				regulator-name = "vreg_pmu_wlmx_0p85";
++			};
++
++			vreg_pmu_btcmx_0p85: ldo4 {
++				regulator-name = "vreg_pmu_btcmx_0p85";
++			};
++
++			vreg_pmu_rfa_0p8: ldo5 {
++				regulator-name = "vreg_pmu_rfa_0p8";
++			};
++
++			vreg_pmu_rfa_1p2: ldo6 {
++				regulator-name = "vreg_pmu_rfa_1p2";
++			};
++
++			vreg_pmu_rfa_1p7: ldo7 {
++				regulator-name = "vreg_pmu_rfa_1p7";
++			};
++
++			vreg_pmu_pcie_0p9: ldo8 {
++				regulator-name = "vreg_pmu_pcie_0p9";
++			};
++
++			vreg_pmu_pcie_1p8: ldo9 {
++				regulator-name = "vreg_pmu_pcie_1p8";
++			};
++		};
++	};
++};
++
++&pmk8550_gpios {
++	pmk8550_sleep_clk_default: sleep-clk-default-state {
++		pins = "gpio5";
++		function = "func1";
++		input-disable;
++		output-enable;
++		bias-disable;
++		power-source = <0>;
++	};
++};
++
++&pmr735b_gpios {
++	s1j_enable_default: s1j-enable-default-state {
++		pins = "gpio1";
++		function = PMIC_GPIO_FUNC_NORMAL;
++		power-source = <0>;
++		bias-disable;
++		output-low;
++	};
++};
++
++&tlmm {
++	bluetooth_enable_default: bluetooth-enable-default-state {
++		pins = "gpio53";
++		function = "gpio";
++		output-low;
++		bias-disable;
++	};
++
++	qup_uart11_sleep_cts: qup-uart11-sleep-cts-state {
++		pins = "gpio48";
++		function = "gpio";
++		bias-bus-hold;
++	};
++
++	qup_uart11_sleep_rts: qup-uart11-sleep-rts-state {
++		pins = "gpio49";
++		function = "gpio";
++		bias-pull-down;
++	};
++
++	qup_uart11_sleep_tx: qup-uart11-sleep-tx-state {
++		pins = "gpio50";
++		function = "gpio";
++		bias-pull-up;
++	};
++
++	qup_uart11_sleep_rx: qup-uart11-sleep-rx-state {
++		pins = "gpio51";
++		function = "gpio";
++		bias-pull-up;
++	};
++};
++
++&uart11 {
++	/delete-property/ interrupts;
++	interrupts-extended = <&intc GIC_SPI 586 IRQ_TYPE_LEVEL_HIGH 0>,
++			      <&tlmm 51 IRQ_TYPE_EDGE_FALLING>;
++
++	pinctrl-1 = <&qup_uart11_sleep_cts>,
++		    <&qup_uart11_sleep_rts>,
++		    <&qup_uart11_sleep_tx>,
++		    <&qup_uart11_sleep_rx>;
++	pinctrl-names = "default", "sleep";
++
++	status = "okay";
++
++	bluetooth {
++		compatible = "qcom,wcn6755-bt", "qcom,wcn6750-bt";
++
++		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
++		vddaon-supply = <&vreg_pmu_aon_0p59>;
++		vddbtcmx-supply = <&vreg_pmu_btcmx_0p85>;
++		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
++		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
++		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
++	};
++};
++
++&wifi {
++	qcom,calibration-variant = "Nothing_Phone_4a";
++
++	status = "okay";
++};
++
++/* ---- Audio: 2x Awinic smart amps (earpiece + speaker) on i2c13, primary MI2S ---- */
++&tlmm {
++	qup_i2c13_data_clk: qup-i2c13-data-clk-state {
++		/* SDA, SCL */
++		pins = "gpio59", "gpio60";
++		function = "qup1_se6";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
++	i2s0_active: i2s0-active-state {
++		sck-pins {
++			pins = "gpio15";
++			function = "i2s0_sck";
++			drive-strength = <8>;
++			bias-disable;
++			output-high;
++		};
++		data0-pins {
++			pins = "gpio16";
++			function = "i2s0_data0";
++			drive-strength = <8>;
++			bias-disable;
++		};
++		data1-pins {
++			pins = "gpio17";
++			function = "i2s0_data1";
++			drive-strength = <8>;
++			bias-disable;
++		};
++		ws-pins {
++			pins = "gpio18";
++			function = "i2s0_ws";
++			drive-strength = <8>;
++			bias-disable;
++		};
++	};
++
++	i2s0_sleep: i2s0-sleep-state {
++		pins = "gpio15", "gpio16", "gpio17", "gpio18";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-down;
++		input-enable;
++	};
++
++	aw_reset_default: aw-reset-default-state {
++		pins = "gpio141", "gpio142";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		output-high;
++	};
++};
++
++&qupv3_id_1 {
++	i2c13: i2c@898000 {
++		compatible = "qcom,geni-i2c";
++		reg = <0x0 0x00898000 0x0 0x4000>;
++
++		interrupts = <GIC_SPI 461 IRQ_TYPE_LEVEL_HIGH 0>;
++
++		clocks = <&gcc GCC_QUPV3_WRAP1_S6_CLK>;
++		clock-names = "se";
++
++		interconnects = <&clk_virt MASTER_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS
++				 &clk_virt SLAVE_QUP_CORE_1 QCOM_ICC_TAG_ALWAYS>,
++				<&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++				 &cnoc_cfg SLAVE_QUP_1 QCOM_ICC_TAG_ACTIVE_ONLY>,
++				<&aggre1_noc MASTER_QUP_1 QCOM_ICC_TAG_ALWAYS
++				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++		interconnect-names = "qup-core",
++				     "qup-config",
++				     "qup-memory";
++
++		dmas = <&gpi_dma1 0 6 QCOM_GPI_I2C>,
++		       <&gpi_dma1 1 6 QCOM_GPI_I2C>;
++		dma-names = "tx",
++			    "rx";
++
++		pinctrl-0 = <&qup_i2c13_data_clk>, <&aw_reset_default>;
++		pinctrl-names = "default";
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		status = "okay";
++
++		/* earpiece (receiver) + top speaker */
++		aw88261_l: audio-codec@34 {
++			compatible = "awinic,aw88261";
++			reg = <0x34>;
++
++			dvdd-supply = <&vreg_aw_dvdd>;
++			sound-name-prefix = "Amplifier L";
++			firmware-name = "qcom/milos/nothing/frogger/aw88261_acf.bin";
++
++			awinic,audio-channel = <0>;
++			awinic,sync-flag;
++
++			#sound-dai-cells = <0>;
++		};
++
++		/* bottom speaker */
++		aw88261_r: audio-codec@35 {
++			compatible = "awinic,aw88261";
++			reg = <0x35>;
++
++			dvdd-supply = <&vreg_aw_dvdd>;
++			sound-name-prefix = "Amplifier R";
++			firmware-name = "qcom/milos/nothing/frogger/aw88261_acf.bin";
++
++			awinic,audio-channel = <1>;
++			awinic,sync-flag;
++
++			#sound-dai-cells = <0>;
++		};
++	};
++};
++
++/ {
++	vreg_aw_dvdd: regulator-aw-dvdd {
++		compatible = "regulator-fixed";
++		regulator-name = "aw_dvdd";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	sound {
++		compatible = "qcom,milos-sndcard";
++		model = "Nothing-Phone-4a";
++
++		/* same PRM request Android's AGM makes: primary MI2S bit clock, 48 kHz x 2 x 32 bit */
++		clocks = <&q6prmcc LPASS_CLK_ID_PRI_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++		clock-names = "pri-mi2s-ibit";
++		assigned-clocks = <&q6prmcc LPASS_CLK_ID_PRI_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++		assigned-clock-rates = <3072000>;
++
++		pinctrl-0 = <&i2s0_active>;
++		pinctrl-1 = <&i2s0_sleep>;
++		pinctrl-names = "default",
++				"sleep";
++
++		rx-dma-test-dai-link {
++			link-name = "RX Codec DMA test";
++
++			codec {
++				sound-dai = <&lpass_rxmacro 0>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai RX_CODEC_DMA_RX_0>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
++		primary-mi2s-capture-dai-link {
++			link-name = "Primary MI2S Capture";
++
++			codec {
++				sound-dai = <&aw88261_l>, <&aw88261_r>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai PRIMARY_MI2S_TX>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
++		primary-mi2s-dai-link {
++			link-name = "Primary MI2S Playback";
++
++			codec {
++				sound-dai = <&aw88261_l>, <&aw88261_r>;
++			};
++
++			cpu {
++				sound-dai = <&q6apmbedai PRIMARY_MI2S_RX>;
++			};
++
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++	};
++};
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt37706a.c b/drivers/gpu/drm/panel/panel-novatek-nt37706a.c
+new file mode 100644
+index 000000000..f8d497420
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-novatek-nt37706a.c
+@@ -0,0 +1,380 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * DRM driver for the Novatek NT37706A AMOLED DSI video panel (VXN variant,
++ * 1224x2720@120Hz, DSC) used in the Nothing Phone (4a).
++ * Initialisation sequence and timings derived from the vendor device tree.
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/regulator/consumer.h>
++
++#include <video/mipi_display.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++struct nt37706a_panel {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct regulator_bulk_data *supplies;
++	struct gpio_desc *reset_gpio;
++};
++
++static const struct regulator_bulk_data nt37706a_supplies[] = {
++	{ .supply = "vddio" },
++	{ .supply = "vddic" },
++	{ .supply = "vci" },
++};
++
++static inline struct nt37706a_panel *to_nt37706a_panel(struct drm_panel *panel)
++{
++	return container_of_const(panel, struct nt37706a_panel, panel);
++}
++
++int msm_dsi_host_get_vrefresh(struct mipi_dsi_host *host);
++
++static void nt37706a_reset(struct nt37706a_panel *ctx)
++{
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++}
++
++static u8 nt37706a_rate_sel(struct nt37706a_panel *ctx)
++{
++	int hz = msm_dsi_host_get_vrefresh(ctx->dsi->host);
++
++	if (hz > 0 && hz <= 65)
++		return 0x02;	/* 60 Hz */
++	if (hz > 65 && hz <= 100)
++		return 0x01;	/* 90 Hz */
++	return 0x00;		/* 120 Hz */
++}
++
++static int nt37706a_on(struct nt37706a_panel *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x80);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x1f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf4, 0x0b);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf4, 0x3f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x08);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfc, 0x03);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x80);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x24);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf8, 0xff);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x84);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf8, 0x02);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x84);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x15);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x84);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x27);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0xaa, 0x55, 0xa5, 0x84);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0xa9);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf4, 0xf3);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x87, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x17, 0x03);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x2a, 0x00, 0x00, 0x04, 0xc7);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x2b, 0x00, 0x00, 0x0a, 0x9f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x90, 0x03, 0x43);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0xab, 0xa8, 0x00, 0x28, 0xe2, 0x00, 0x02, 0x65, 0x03, 0xc7, 0x00, 0x08, 0x02, 0xe0, 0x02, 0x3f, 0x10, 0xf0);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x53, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3b, 0x00, 0x30, 0x00, 0x50, 0x00, 0x30, 0x00, 0x4c, 0x00, 0x30, 0x04, 0x00, 0x00, 0x30, 0x0b, 0x68);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x6f, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x3b, 0x00, 0x30, 0x00, 0x4c);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x88, 0x01);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x81, 0x01, 0x19);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
++	{
++		u8 rate_cmd[] = { 0x2f, nt37706a_rate_sel(ctx) };
++
++		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, rate_cmd, sizeof(rate_cmd));
++	}
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x55, 0xaa, 0x52, 0x08, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xbe, 0x47);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x55, 0xaa, 0x52, 0x08, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb2, 0x91);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_EXIT_SLEEP_MODE);
++	mipi_dsi_msleep(&dsi_ctx, 120);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_ON);
++
++	return dsi_ctx.accum_err;
++}
++
++static int nt37706a_off(struct nt37706a_panel *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_OFF);
++	mipi_dsi_msleep(&dsi_ctx, 20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_ENTER_SLEEP_MODE);
++	mipi_dsi_msleep(&dsi_ctx, 100);
++
++	return dsi_ctx.accum_err;
++}
++
++static int nt37706a_prepare(struct drm_panel *panel)
++{
++	struct nt37706a_panel *ctx = to_nt37706a_panel(panel);
++	struct device *dev = &ctx->dsi->dev;
++	struct drm_dsc_picture_parameter_set pps;
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(nt37706a_supplies), ctx->supplies);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable regulators: %d\n", ret);
++		return ret;
++	}
++	usleep_range(2000, 3000);
++
++	nt37706a_reset(ctx);
++
++	ret = nt37706a_on(ctx);
++	if (ret < 0) {
++		dev_err(dev, "Failed to initialize panel: %d\n", ret);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		regulator_bulk_disable(ARRAY_SIZE(nt37706a_supplies), ctx->supplies);
++		return ret;
++	}
++
++	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
++	print_hex_dump(KERN_INFO, "NURA-DBG pps: ", DUMP_PREFIX_OFFSET, 16, 1, &pps, sizeof(pps), false);
++
++	ret = mipi_dsi_picture_parameter_set(ctx->dsi, &pps);
++	if (ret < 0) {
++		dev_err(panel->dev, "failed to transmit PPS: %d\n", ret);
++		return ret;
++	}
++
++	ret = mipi_dsi_compression_mode(ctx->dsi, true);
++	if (ret < 0) {
++		dev_err(dev, "failed to enable compression mode: %d\n", ret);
++		return ret;
++	}
++
++	msleep(28);
++
++	return 0;
++}
++
++static int nt37706a_unprepare(struct drm_panel *panel)
++{
++	struct nt37706a_panel *ctx = to_nt37706a_panel(panel);
++	struct device *dev = &ctx->dsi->dev;
++	int ret;
++
++	ret = nt37706a_off(ctx);
++	if (ret < 0)
++		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	regulator_bulk_disable(ARRAY_SIZE(nt37706a_supplies), ctx->supplies);
++
++	return 0;
++}
++
++#define NT37706A_MODE(hz, vfp) {							\
++	.clock = (1224 + 41 + 16 + 16) * (2720 + (vfp) + 2 + 46) * (hz) / 1000,	\
++	.hdisplay = 1224,								\
++	.hsync_start = 1224 + 41,							\
++	.hsync_end = 1224 + 41 + 16,							\
++	.htotal = 1224 + 41 + 16 + 16,							\
++	.vdisplay = 2720,								\
++	.vsync_start = 2720 + (vfp),							\
++	.vsync_end = 2720 + (vfp) + 2,							\
++	.vtotal = 2720 + (vfp) + 2 + 46,						\
++	.width_mm = 71,									\
++	.height_mm = 157,								\
++}
++
++/* same pixel clock for every rate, the vertical front porch is stretched */
++static const struct drm_display_mode nt37706a_modes[] = {
++	NT37706A_MODE(120, 76),
++	NT37706A_MODE(90, 1024),
++	NT37706A_MODE(60, 2920),
++};
++
++static int nt37706a_get_modes(struct drm_panel *panel,
++			      struct drm_connector *connector)
++{
++	int i, count = 0;
++
++	for (i = 0; i < ARRAY_SIZE(nt37706a_modes); i++) {
++		struct drm_display_mode *mode =
++			drm_mode_duplicate(connector->dev, &nt37706a_modes[i]);
++
++		if (!mode)
++			return count;
++		/*
++	 * phoc 0.55 only honours a requested mode when it is flagged preferred
++	 * (anything else is treated as a "custom mode" and ignored), so flag all
++	 * refresh rates as preferred; the first one (120 Hz) stays the default.
++	 */
++		mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++		count++;
++	}
++
++	connector->display_info.width_mm = 71;
++	connector->display_info.height_mm = 157;
++	return count;
++}
++
++static const struct drm_panel_funcs nt37706a_panel_funcs = {
++	.prepare = nt37706a_prepare,
++	.unprepare = nt37706a_unprepare,
++	.get_modes = nt37706a_get_modes,
++};
++
++static int nt37706a_bl_update_status(struct backlight_device *bl)
++{
++	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	u16 brightness = backlight_get_brightness(bl);
++	int ret;
++
++	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++
++	ret = mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
++	if (ret < 0)
++		return ret;
++
++	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	return 0;
++}
++
++static const struct backlight_ops nt37706a_bl_ops = {
++	.update_status = nt37706a_bl_update_status,
++};
++
++static struct backlight_device *
++nt37706a_create_backlight(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.scale = BACKLIGHT_SCALE_NON_LINEAR,
++		.brightness = 2047,
++		.max_brightness = 4095,
++	};
++
++	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
++					      &nt37706a_bl_ops, &props);
++}
++
++static int nt37706a_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct nt37706a_panel *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct nt37706a_panel, panel,
++				   &nt37706a_panel_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ret = devm_regulator_bulk_get_const(dev,
++					    ARRAY_SIZE(nt37706a_supplies),
++					    nt37706a_supplies,
++					    &ctx->supplies);
++	if (ret < 0)
++		return ret;
++
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "Failed to get reset-gpios\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB101010;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
++			  MIPI_DSI_MODE_NO_EOT_PACKET |
++			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	ctx->panel.prepare_prev_first = true;
++
++	ctx->panel.backlight = nt37706a_create_backlight(dsi);
++	if (IS_ERR(ctx->panel.backlight))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
++				     "Failed to create backlight\n");
++
++	drm_panel_add(&ctx->panel);
++
++	/* This panel only supports DSC; unconditionally enable it */
++	dsi->dsc = &ctx->dsc;
++
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 2;
++
++	ctx->dsc.slice_height = 40;
++	ctx->dsc.slice_width = 612;
++	WARN_ON(1224 % ctx->dsc.slice_width);
++	ctx->dsc.slice_count = 1224 / ctx->dsc.slice_width;
++	ctx->dsc.bits_per_component = 10;
++	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
++	ctx->dsc.block_pred_enable = true;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_panel_remove(&ctx->panel);
++		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
++	}
++
++	return 0;
++}
++
++static void nt37706a_remove(struct mipi_dsi_device *dsi)
++{
++	struct nt37706a_panel *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id nt37706a_of_match[] = {
++	{ .compatible = "nothing,frogger-nt37706a-vxn" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, nt37706a_of_match);
++
++static struct mipi_dsi_driver nt37706a_driver = {
++	.probe = nt37706a_probe,
++	.remove = nt37706a_remove,
++	.driver = {
++		.name = "panel-novatek-nt37706a",
++		.of_match_table = nt37706a_of_match,
++	},
++};
++module_mipi_dsi_driver(nt37706a_driver);
++
++MODULE_DESCRIPTION("DRM driver for the NT37706A VXN DSI panel (Nothing Phone 4a)");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/focaltech-fts-spi.c b/drivers/input/touchscreen/focaltech-fts-spi.c
+new file mode 100644
+index 000000000..a9d6cdcf7
+--- /dev/null
++++ b/drivers/input/touchscreen/focaltech-fts-spi.c
+@@ -0,0 +1,281 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FocalTech FTS (FT3681 / FT3683G) SPI touchscreen driver, "SPI v2" protocol
++ * with CRC16 protected reads, as found on the Nothing Phone (4a).
++ *
++ * Protocol (derived from observed behaviour of the vendor driver):
++ *   tx: [reg][ctrl][len_hi][len_lo][3 dummy][payload / dummy .. + 2 crc]
++ *   ctrl = 0x00 for write, 0xa0 for read with CRC
++ *   rx[3] & 0xa0 must be zero for a valid transaction
++ *   read data starts at rx[7], followed by CRC16/MCRF4XX (little endian)
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/spi/spi.h>
++
++#define FTS_MAX_POINTS		10
++#define FTS_POINT_LEN		8
++#define FTS_HEADER_LEN		4
++#define FTS_TOUCH_DATA_LEN	(FTS_MAX_POINTS * FTS_POINT_LEN + FTS_HEADER_LEN)
++
++#define FTS_REG_TOUCH		0x01
++#define FTS_REG_CHIP_ID		0xa3
++#define FTS_REG_FW_VER		0xa6
++
++#define FTS_SPI_RETRIES		20
++#define FTS_SPI_HDR		7	/* 4 header + 3 dummy */
++#define FTS_CTRL_READ_CRC	0xa0
++#define FTS_HIRES_DIV		16
++
++struct fts_spi {
++	struct spi_device *spi;
++	struct input_dev *input;
++	struct gpio_desc *reset;
++	struct regulator_bulk_data supplies[2];
++	struct touchscreen_properties prop;
++	struct mutex lock;
++	u8 *tx;
++	u8 *rx;
++	u8 touch[FTS_TOUCH_DATA_LEN];
++};
++
++static u16 fts_crc16(const u8 *data, size_t len)
++{
++	u16 crc = 0xffff;
++	size_t i;
++	int j;
++
++	for (i = 0; i < len; i++) {
++		crc ^= data[i];
++		for (j = 0; j < 8; j++)
++			crc = (crc & 1) ? (crc >> 1) ^ 0x8408 : crc >> 1;
++	}
++	return crc;
++}
++
++static int fts_read(struct fts_spi *ts, u8 reg, u8 *out, u16 len)
++{
++	size_t total = FTS_SPI_HDR + len + 2;
++	int ret = -EIO, i;
++
++	mutex_lock(&ts->lock);
++	for (i = 0; i < FTS_SPI_RETRIES; i++) {
++		struct spi_transfer xfer = {
++			.tx_buf = ts->tx,
++			.rx_buf = ts->rx,
++			.len = total,
++		};
++
++		memset(ts->tx, 0, total);
++		ts->tx[0] = reg;
++		ts->tx[1] = FTS_CTRL_READ_CRC;
++		ts->tx[2] = len >> 8;
++		ts->tx[3] = len & 0xff;
++
++		ret = spi_sync_transfer(ts->spi, &xfer, 1);
++		udelay(150);
++		if (ret)
++			continue;
++		if (ts->rx[3] & 0xa0) {
++			ret = -EIO;
++			continue;
++		}
++		if (fts_crc16(&ts->rx[FTS_SPI_HDR], len) !=
++		    (ts->rx[FTS_SPI_HDR + len] | (ts->rx[FTS_SPI_HDR + len + 1] << 8))) {
++			ret = -EBADMSG;
++			continue;
++		}
++		memcpy(out, &ts->rx[FTS_SPI_HDR], len);
++		ret = 0;
++		break;
++	}
++	mutex_unlock(&ts->lock);
++	return ret;
++}
++
++static irqreturn_t fts_irq(int irq, void *data)
++{
++	struct fts_spi *ts = data;
++	struct input_dev *input = ts->input;
++	u8 *buf = ts->touch;
++	int events, i, ret;
++
++	ret = fts_read(ts, FTS_REG_TOUCH, buf, FTS_TOUCH_DATA_LEN);
++	if (ret) {
++		dev_dbg(&ts->spi->dev, "touch read failed: %d\n", ret);
++		return IRQ_HANDLED;
++	}
++
++	/* 0xff in the first points means the firmware just (re)started */
++	if (buf[1] == 0xff && buf[2] == 0xff && buf[3] == 0xff)
++		return IRQ_HANDLED;
++
++	events = buf[1] & 0x0f;
++	if (events > FTS_MAX_POINTS)
++		return IRQ_HANDLED;
++
++	for (i = 0; i < events; i++) {
++		const u8 *p = &buf[FTS_HEADER_LEN + i * FTS_POINT_LEN];
++		u8 flag = p[0] >> 6;
++		u8 id = p[2] >> 4;
++		int x, y;
++
++		if (id >= FTS_MAX_POINTS)
++			continue;
++
++		x = (((p[0] & 0x0f) << 12) | (p[1] << 4) | (p[4] >> 4)) / FTS_HIRES_DIV;
++		y = (((p[2] & 0x0f) << 12) | (p[3] << 4) | (p[4] & 0x0f)) / FTS_HIRES_DIV;
++
++		input_mt_slot(input, id);
++		if (flag == 1) {	/* up */
++			input_mt_report_slot_inactive(input);
++			continue;
++		}
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(input, &ts->prop, x, y, true);
++		input_report_abs(input, ABS_MT_TOUCH_MAJOR, p[5] ? p[5] : 9);
++	}
++
++	if (!events) {
++		for (i = 0; i < FTS_MAX_POINTS; i++) {
++			input_mt_slot(input, i);
++			input_mt_report_slot_inactive(input);
++		}
++	}
++
++	input_mt_sync_frame(input);
++	input_sync(input);
++	return IRQ_HANDLED;
++}
++
++static void fts_power_off(void *data)
++{
++	struct fts_spi *ts = data;
++
++	gpiod_set_value_cansleep(ts->reset, 1);
++	regulator_bulk_disable(ARRAY_SIZE(ts->supplies), ts->supplies);
++}
++
++static int fts_probe(struct spi_device *spi)
++{
++	struct device *dev = &spi->dev;
++	struct fts_spi *ts;
++	u8 id = 0, ver = 0;
++	int ret;
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->spi = spi;
++	mutex_init(&ts->lock);
++	ts->tx = devm_kzalloc(dev, FTS_SPI_HDR + FTS_TOUCH_DATA_LEN + 2, GFP_KERNEL);
++	ts->rx = devm_kzalloc(dev, FTS_SPI_HDR + FTS_TOUCH_DATA_LEN + 2, GFP_KERNEL);
++	if (!ts->tx || !ts->rx)
++		return -ENOMEM;
++
++	spi->mode = SPI_MODE_0;
++	spi->bits_per_word = 8;
++	ret = spi_setup(spi);
++	if (ret)
++		return ret;
++
++	ts->supplies[0].supply = "vci";
++	ts->supplies[1].supply = "vddio";
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ts->supplies), ts->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get supplies\n");
++
++	ts->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ts->reset))
++		return dev_err_probe(dev, PTR_ERR(ts->reset), "failed to get reset gpio\n");
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(ts->supplies), ts->supplies);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, fts_power_off, ts);
++	if (ret)
++		return ret;
++
++	/* reset pulse: assert (low) for a short while, then release */
++	msleep(5);
++	gpiod_set_value_cansleep(ts->reset, 1);
++	msleep(2);
++	gpiod_set_value_cansleep(ts->reset, 0);
++	msleep(200);
++
++	ret = fts_read(ts, FTS_REG_CHIP_ID, &id, 1);
++	if (ret)
++		return dev_err_probe(dev, ret, "no response from touch controller\n");
++	fts_read(ts, FTS_REG_FW_VER, &ver, 1);
++	dev_info(dev, "FocalTech FTS chip id 0x%02x, firmware 0x%02x\n", id, ver);
++
++	ts->input = devm_input_allocate_device(dev);
++	if (!ts->input)
++		return -ENOMEM;
++
++	ts->input->name = "FocalTech FTS touchscreen";
++	ts->input->id.bustype = BUS_SPI;
++	input_set_capability(ts->input, EV_ABS, ABS_MT_POSITION_X);
++	input_set_capability(ts->input, EV_ABS, ABS_MT_POSITION_Y);
++	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	touchscreen_parse_properties(ts->input, true, &ts->prop);
++	if (!ts->prop.max_x || !ts->prop.max_y) {
++		input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0, 1223, 0, 0);
++		input_set_abs_params(ts->input, ABS_MT_POSITION_Y, 0, 2719, 0, 0);
++		touchscreen_parse_properties(ts->input, true, &ts->prop);
++	}
++
++	ret = input_mt_init_slots(ts->input, FTS_MAX_POINTS, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		return ret;
++
++	ret = input_register_device(ts->input);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, spi->irq, NULL, fts_irq,
++					IRQF_ONESHOT | IRQF_TRIGGER_FALLING,
++					"fts-spi", ts);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request irq\n");
++
++	spi_set_drvdata(spi, ts);
++	return 0;
++}
++
++static const struct of_device_id fts_of_match[] = {
++	{ .compatible = "focaltech,ft3683g-spi" },
++	{ .compatible = "focaltech,ft3681-spi" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, fts_of_match);
++
++static const struct spi_device_id fts_spi_ids[] = {
++	{ "ft3683g-spi" },
++	{ "ft3681-spi" },
++	{ }
++};
++MODULE_DEVICE_TABLE(spi, fts_spi_ids);
++
++static struct spi_driver fts_spi_driver = {
++	.driver = {
++		.name = "focaltech-fts-spi",
++		.of_match_table = fts_of_match,
++	},
++	.probe = fts_probe,
++	.id_table = fts_spi_ids,
++};
++module_spi_driver(fts_spi_driver);
++
++MODULE_DESCRIPTION("FocalTech FTS SPI v2 touchscreen driver");
++MODULE_LICENSE("GPL");

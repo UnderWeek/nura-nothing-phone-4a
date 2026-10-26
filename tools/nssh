@@ -1,0 +1,5 @@
+#!/bin/bash
+# ssh into Nura running on the phone over the USB ethernet gadget (IPv6 link-local).
+# usage: IFACE=en5 tools/nssh [command...]   (find IFACE with `ifconfig | grep -B1 fe80::ff:fe00`)
+IFACE=${IFACE:-en5}
+exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR nura@fe80::ff:fe00:1%$IFACE "$@"
